@@ -1,0 +1,11 @@
+# eclipse files
+/.project
+/.settings/
+
+# modules
+/**/target/
+
+# eclipse files (modules)
+/**/.classpath
+/**/.project
+/**/.settings/
