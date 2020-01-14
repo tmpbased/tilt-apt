@@ -1,5 +1,6 @@
 package tilt.apt.dispatch.processor;
 
+import com.google.auto.service.AutoService;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
@@ -34,7 +35,6 @@ import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.tools.Diagnostic.Kind;
 import javax.tools.FileObject;
-import com.google.auto.service.AutoService;
 import tilt.apt.dispatch.annotations.Case;
 import tilt.apt.dispatch.annotations.Switch;
 
@@ -167,7 +167,31 @@ public class DispatchProcessor extends AbstractProcessor {
                               "final %s %s",
                               asTypeElement(it.asType()).getQualifiedName(), it.getSimpleName()))
                   .collect(Collectors.joining(", "))));
-      // TODO implementation
+      w.append(
+          subclass
+              .caseParameters
+              .stream()
+              .map(
+                  it ->
+                      String.format(
+                          "if (%s instanceof %s) {\n%s(%s);\n}",
+                          subclass.switchParameter.getSimpleName(),
+                          asTypeElement(it.asType()).getQualifiedName(),
+                          ((ExecutableElement) it.getEnclosingElement()).getSimpleName(),
+                          method
+                              .getParameters()
+                              .stream()
+                              .map(
+                                  it2 ->
+                                      it2 == subclass.switchParameter
+                                          ? String.format(
+                                              "(%s) %s",
+                                              asTypeElement(it.asType()).getQualifiedName(),
+                                              it2.getSimpleName())
+                                          : it2.getSimpleName())
+                              .map(Object::toString)
+                              .collect(Collectors.joining(", "))))
+              .collect(Collectors.joining(" else ", "", "\n")));
       w.append("}\n");
       w.append("}\n");
     } catch (final IOException e) {
@@ -237,6 +261,9 @@ public class DispatchProcessor extends AbstractProcessor {
     log(switchElements.toString());
     for (final Element e : switchElements) {
       final VariableElement switchParameter = getSuitableSwitchParameter((VariableElement) e);
+      if (switchParameter == null) {
+        continue;
+      }
       final TypeElement typeElement = getEnclosingTypeElement(switchParameter);
       final SwitchSubclass subclass =
           subclasses.computeIfAbsent(typeElement.asType(), key -> new SwitchSubclass());
@@ -246,6 +273,9 @@ public class DispatchProcessor extends AbstractProcessor {
     log(caseElements.toString());
     for (final Element e : caseElements) {
       final VariableElement caseParameter = getSuitableCaseParameter((VariableElement) e);
+      if (caseParameter == null) {
+        continue;
+      }
       final TypeElement typeElement = getEnclosingTypeElement(caseParameter);
       final SwitchSubclass subclass =
           subclasses.computeIfAbsent(typeElement.asType(), key -> new SwitchSubclass());
