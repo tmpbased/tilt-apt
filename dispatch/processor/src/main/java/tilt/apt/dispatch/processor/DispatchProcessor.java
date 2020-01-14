@@ -103,15 +103,69 @@ public class DispatchProcessor extends AbstractProcessor {
               Collectors.groupingBy(
                   it -> getPackageOf(it.getKey()),
                   Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue)))
-          .forEach((packageElement, blocks) -> writeSubclasses(packageElement, blocks));
+          .forEach(
+              (packageElement, subclasses) -> {
+                writeSuperclasses(packageElement, subclasses.keySet());
+                writeSubclasses(packageElement, subclasses);
+              });
     } else {
       processAnnotations(annotations, roundEnv);
     }
     return true;
   }
 
+  private void writeSuperclasses(PackageElement packageElement, Set<TypeMirror> typeMirrors) {
+    Filer filer = processingEnv.getFiler();
+    try {
+      FileObject fileObject =
+          filer.createSourceFile(
+              (packageElement.isUnnamed() ? "" : packageElement.getQualifiedName() + ".")
+                  + "GeneratedSuperclass");
+      try (final BufferedWriter w =
+          new BufferedWriter(
+              new OutputStreamWriter(fileObject.openOutputStream(), StandardCharsets.UTF_8))) {
+        if (packageElement.isUnnamed() == false) {
+          w.append(String.format("package %s;\n", packageElement.getQualifiedName()));
+        }
+        w.append(String.format("final class %s {\n", "GeneratedSuperclass"));
+        typeMirrors.forEach(typeMirror -> writeSuperclass(w, typeMirror));
+        w.append("}\n");
+        w.flush();
+      }
+    } catch (final IOException e) {
+      e.printStackTrace();
+    }
+  }
+
+  private void writeSuperclass(final BufferedWriter w, TypeMirror typeMirror) {
+    try {
+      w.append(
+          String.format(
+              "static abstract class %s%s{\n",
+              asTypeElement(typeMirror).getSimpleName(),
+              ((DeclaredType) typeMirror).getTypeArguments().isEmpty()
+                  ? " "
+                  : String.format(
+                      " <T> extends %s ",
+                      asTypeElement(((DeclaredType) typeMirror).getTypeArguments().get(0))
+                          .getQualifiedName())));
+      w.append(
+          String.format(
+              "public static %s newInstance() {\n", // TODO throws
+              asTypeElement(typeMirror).getQualifiedName()));
+      w.append(
+          String.format(
+              "return new %s.%s();\n",
+              "GeneratedSubclass", asTypeElement(typeMirror).getSimpleName()));
+      w.append("}\n");
+      w.append("}\n");
+    } catch (final IOException e) {
+      e.printStackTrace();
+    }
+  }
+
   private void writeSubclasses(
-      PackageElement packageElement, Map<TypeMirror, SwitchSubclass> blocks) {
+      PackageElement packageElement, Map<TypeMirror, SwitchSubclass> subclasses) {
     Filer filer = processingEnv.getFiler();
     try {
       FileObject fileObject =
@@ -125,7 +179,7 @@ public class DispatchProcessor extends AbstractProcessor {
           w.append(String.format("package %s;\n", packageElement.getQualifiedName()));
         }
         w.append(String.format("final class %s {\n", "GeneratedSubclass"));
-        blocks.forEach((typeMirror, block) -> writeSubclass(w, typeMirror, block));
+        subclasses.forEach((typeMirror, subclass) -> writeSubclass(w, typeMirror, subclass));
         w.append("}\n");
         w.flush();
       }
