@@ -1,11 +1,15 @@
 # eclipse files
 /.project
+/.factorypath
 /.settings/
 
 # modules
 /**/target/
+/.flattened-pom.xml
+/**/.flattened-pom.xml
 
 # eclipse files (modules)
 /**/.classpath
+/**/.factorypath
 /**/.project
 /**/.settings/

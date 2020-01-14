@@ -2,15 +2,8 @@
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>tilt-apt</groupId>
-    <artifactId>dispatch</artifactId>
+    <artifactId>tilt-dispatch</artifactId>
     <version>${revision}</version>
   </parent>
-  <artifactId>dispatch-processor</artifactId>
-  <dependencies>
-    <dependency>
-      <groupId>tilt-apt</groupId>
-      <artifactId>dispatch-annotations</artifactId>
-      <version>${revision}</version>
-    </dependency>
-  </dependencies>
+  <artifactId>tilt-dispatch-annotations</artifactId>
 </project>

@@ -2,13 +2,13 @@
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>tilt-apt</groupId>
-    <artifactId>parent</artifactId>
+    <artifactId>tilt-apt</artifactId>
     <version>${revision}</version>
   </parent>
-  <artifactId>dispatch</artifactId>
+  <artifactId>tilt-dispatch</artifactId>
   <packaging>pom</packaging>
   <modules>
-    <module>dispatch-annotations</module>
-    <module>dispatch-processor</module>
+    <module>annotations</module>
+    <module>processor</module>
   </modules>
 </project>
