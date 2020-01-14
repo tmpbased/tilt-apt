@@ -5,7 +5,7 @@
     <artifactId>tilt-apt</artifactId>
     <version>${revision}</version>
   </parent>
-  <artifactId>tilt-dispatch</artifactId>
+  <artifactId>auto-dispatch</artifactId>
   <packaging>pom</packaging>
   <modules>
     <module>annotations</module>
