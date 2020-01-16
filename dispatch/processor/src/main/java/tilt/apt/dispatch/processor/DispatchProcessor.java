@@ -5,9 +5,10 @@ import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedList;
@@ -29,13 +30,21 @@ import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.Element;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
+import javax.lang.model.element.ModuleElement;
+import javax.lang.model.element.Name;
 import javax.lang.model.element.PackageElement;
 import javax.lang.model.element.TypeElement;
+import javax.lang.model.element.TypeParameterElement;
 import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.DeclaredType;
+import javax.lang.model.type.ErrorType;
+import javax.lang.model.type.NoType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.type.TypeVariable;
+import javax.lang.model.util.ElementKindVisitor9;
+import javax.lang.model.util.SimpleElementVisitor9;
+import javax.lang.model.util.SimpleTypeVisitor9;
 import javax.tools.Diagnostic.Kind;
 import javax.tools.FileObject;
 import com.google.auto.service.AutoService;
@@ -85,90 +94,291 @@ public class DispatchProcessor extends AbstractProcessor {
     return true;
   }
 
-  private void writeSuperclass(TypeMirror typeMirror) {
-    Filer filer = processingEnv.getFiler();
-    try {
-      final TypeElement typeElement = asTypeElement(typeMirror);
-      final FileObject fileObject =
-          filer.createSourceFile(typeElement.getQualifiedName() + SUFFIX_SUPERCLASS);
+  private final class AnnotatedClass {
+    private final TypeElement typeElement;
+
+    public AnnotatedClass(final TypeElement typeElement) {
+      this.typeElement = typeElement;
+    }
+
+    FileObject createSourceFile(final String suffix) throws IOException {
+      Filer filer = processingEnv.getFiler();
+      return filer.createSourceFile(typeElement.getQualifiedName() + suffix);
+    }
+
+    void writePackage(Writer w) throws IOException {
       final PackageElement packageElement =
           processingEnv.getElementUtils().getPackageOf(typeElement);
+      if (packageElement.isUnnamed() == false) {
+        w.append(String.format("package %s;\n", packageElement.getQualifiedName()));
+      }
+    }
+
+    TypeMirror getSuperclass() {
+      return DispatchProcessor.this.getSuperclass(typeElement);
+    }
+
+    String getGeneratedSuperclassSimpleName() {
+      return typeElement.getSimpleName() + SUFFIX_SUPERCLASS;
+    }
+
+    String getGeneratedSubclassSimpleName() {
+      return typeElement.getSimpleName() + SUFFIX_SUBCLASS;
+    }
+
+    List<? extends TypeParameterElement> getTypeParameterElements() {
+      return typeElement.getTypeParameters();
+    }
+
+    void writeClassTypeVariables(Writer w, int stubCount, String prefix, String suffix)
+        throws IOException {
+      final List<? extends TypeParameterElement> typeParameterElements = getTypeParameterElements();
+      if (typeParameterElements.isEmpty()) {
+        return;
+      }
+      w.append(
+          Stream.concat(
+                  typeParameterElements
+                      .stream()
+                      .map(Element::getSimpleName)
+                      .map(Object::toString), // TODO + bounds
+                  IntStream.range(typeParameterElements.size(), stubCount)
+                      .mapToObj(it -> "Stub_" + it))
+              .collect(Collectors.joining(", ", prefix + "<", ">" + suffix)));
+    }
+
+    List<? extends ExecutableElement> getAccessibleConstructors() {
+      final List<ExecutableElement> constructors = new ArrayList<>();
+      for (final Element element : typeElement.getEnclosedElements()) {
+        final ExecutableElement constructor =
+            element.accept(
+                new ElementKindVisitor9<ExecutableElement, TypeElement>() {
+                  @Override
+                  public ExecutableElement visitExecutableAsConstructor(
+                      ExecutableElement e, TypeElement p) {
+                    if (e.getModifiers().contains(Modifier.PRIVATE)) {
+                      return super.visitExecutableAsConstructor(e, p);
+                    }
+                    return e;
+                  }
+                },
+                typeElement);
+        if (constructor != null) {
+          constructors.add(constructor);
+        }
+      }
+      return constructors;
+    }
+
+    void startBlock(Writer w) throws IOException {
+      w.append(" {\n");
+    }
+
+    void endBlock(Writer w) throws IOException {
+      w.append("}\n");
+    }
+
+    private String formatMethodParameter(VariableElement variableElement) {
+      return String.format(
+          "%s %s",
+          variableElement.asType().accept(new TypeNameVisitor(emptyName()), null),
+          variableElement.getSimpleName());
+    }
+
+    String formatMethodParameters(final ExecutableElement executableElement) {
+      return executableElement
+          .getParameters()
+          .stream()
+          .map(this::formatMethodParameter)
+          .collect(Collectors.joining(", "));
+    }
+
+    String formatMethodArguments(final ExecutableElement executableElement) {
+      return executableElement
+          .getParameters()
+          .stream()
+          .map(VariableElement::getSimpleName)
+          .map(Object::toString)
+          .collect(Collectors.joining(", "));
+    }
+
+    String formatMethodThrows(
+        final ExecutableElement executableElement, final String prefix, final String suffix) {
+      if (executableElement.getThrownTypes().isEmpty()) {
+        return "";
+      }
+      return executableElement
+          .getThrownTypes()
+          .stream()
+          .map(it -> it.accept(new TypeNameVisitor(emptyName()), null))
+          .map(Objects::toString)
+          .collect(Collectors.joining(", ", prefix + "throws ", suffix));
+    }
+  }
+
+  final class TypeNameVisitor extends SimpleTypeVisitor9<Name, Void> {
+    public TypeNameVisitor(final Name defaultValue) {
+      super(defaultValue);
+    }
+
+    @Override
+    public Name visitDeclared(DeclaredType t, Void p) {
+      return asElement(t).getQualifiedName();
+    }
+
+    @Override
+    public Name visitTypeVariable(TypeVariable t, Void p) {
+      return asElement(t).getSimpleName();
+    }
+  }
+
+  final class TypeVariableNames {
+    private final DeclaredType declaredType;
+
+    public TypeVariableNames(final DeclaredType declaredType) {
+      this.declaredType = declaredType;
+    }
+
+    Stream<String> streamQualified() {
+      final TypeNameVisitor typeVisitor = new TypeNameVisitor(emptyName());
+      return declaredType
+          .getTypeArguments()
+          .stream()
+          .map(it -> it.accept(typeVisitor, null))
+          .map(Objects::toString);
+    }
+  }
+
+  final class GeneratedSuperclass {
+    private final AnnotatedClass ann;
+    private final DeclaredType declaredType;
+
+    public GeneratedSuperclass(final AnnotatedClass ann) {
+      this.ann = ann;
+      this.declaredType = asDeclaredType(ann.getSuperclass());
+    }
+
+    boolean exists() {
+      return declaredType != null
+          && Objects.equals(getSimpleName(declaredType), ann.getGeneratedSuperclassSimpleName());
+    }
+
+    private void ensureExists() {
+      if (exists() == false) {
+        throw new IllegalStateException("GeneratedSuperclass::exists() == false");
+      }
+    }
+
+    void write(Writer w) throws IOException {
+      ensureExists();
+      w.append(String.format("abstract class %s", ann.getGeneratedSuperclassSimpleName()));
+      writeClassTypeVariables(w, declaredType.getTypeArguments().size(), "", "");
+      writeExtends(w);
+      ann.startBlock(w);
+      for (final ExecutableElement constructor : ann.getAccessibleConstructors()) {
+        w.append(
+            Stream.concat(Stream.of(Modifier.STATIC), constructor.getModifiers().stream())
+                .map(Modifier::toString)
+                .collect(Collectors.joining(" ", "", " ")));
+        writeFactoryTypeVariables(w, "", " "); // TODO + constructor's type variables
+        w.append(ann.typeElement.getQualifiedName());
+        writeFactoryTypeVariables(w, "", "");
+        w.append(
+            String.format(
+                " newInstance(%s)%s",
+                ann.formatMethodParameters(constructor),
+                ann.formatMethodThrows(constructor, " ", "")));
+        ann.startBlock(w);
+        w.append("return new ");
+        w.append(ann.getGeneratedSubclassSimpleName());
+        writeFactoryTypeVariables(w, "", ""); // TODO + constructor's type variables
+        w.append(String.format("(%s);\n", ann.formatMethodArguments(constructor)));
+        ann.endBlock(w);
+      }
+      ann.endBlock(w);
+    }
+
+    private void writeFactoryTypeVariables(Writer w, String prefix, String suffix)
+        throws IOException {
+      ensureExists();
+      final List<? extends TypeParameterElement> typeParameterElements =
+          ann.getTypeParameterElements();
+      if (typeParameterElements.isEmpty()) {
+        return;
+      }
+      w.append(
+          typeParameterElements
+              .stream()
+              .map(Element::getSimpleName) // TODO + bounds
+              .map(Object::toString)
+              .collect(Collectors.joining(", ", prefix + "<", ">" + suffix)));
+    }
+
+    private void writeClassTypeVariables(Writer w, int stubCount, String prefix, String suffix)
+        throws IOException {
+      ensureExists();
+      ann.writeClassTypeVariables(w, stubCount, prefix, suffix);
+    }
+
+    TypeMirror getSuperclass() {
+      return declaredType.accept(new ExistingSuperclassTypeVisitor(), asElement(declaredType));
+    }
+
+    ExistingSuperclass getExistingSuperclass() {
+      ensureExists();
+      return new ExistingSuperclass(this);
+    }
+
+    private void writeExtends(Writer w) throws IOException {
+      final ExistingSuperclass superclass = getExistingSuperclass();
+      if (superclass.exists()) {
+        w.write(" extends ");
+        superclass.writeExtends(w);
+      }
+    }
+  }
+
+  final class ExistingSuperclass {
+    private final DeclaredType declaredType;
+
+    public ExistingSuperclass(final GeneratedSuperclass superGen) {
+      this.declaredType = asDeclaredType(superGen.getSuperclass());
+    }
+
+    public boolean exists() {
+      return declaredType != null;
+    }
+
+    private void ensureExists() {
+      if (exists() == false) {
+        throw new IllegalStateException("ExistingSuperclass::exists() == false");
+      }
+    }
+
+    void writeExtends(Writer w) throws IOException {
+      ensureExists();
+      final TypeVariableNames names = new TypeVariableNames(declaredType);
+      w.append(
+          String.format(
+              "%s%s",
+              asElement(declaredType).getQualifiedName(),
+              names.streamQualified().collect(Collectors.joining(", ", "<", ">"))));
+    }
+  }
+
+  private void writeSuperclass(TypeElement typeElement) {
+    final AnnotatedClass ann = new AnnotatedClass(typeElement);
+    final GeneratedSuperclass superGen = new GeneratedSuperclass(ann);
+    if (superGen.exists() == false) {
+      return;
+    }
+    try {
+      final FileObject fileObject = ann.createSourceFile(SUFFIX_SUPERCLASS);
       try (final BufferedWriter w =
           new BufferedWriter(
               new OutputStreamWriter(fileObject.openOutputStream(), StandardCharsets.UTF_8))) {
-        if (packageElement.isUnnamed() == false) {
-          w.append(String.format("package %s;\n", packageElement.getQualifiedName()));
-        }
-        w.append(
-            String.format("abstract class %s%s", typeElement.getSimpleName(), SUFFIX_SUPERCLASS));
-        final List<? extends Element> typeVariableElements =
-            getTypeArguments(typeMirror)
-                .stream()
-                .filter(TypeVariable.class::isInstance)
-                .map(TypeVariable.class::cast)
-                .map(TypeVariable::asElement)
-                .collect(Collectors.toList());
-        if (Objects.equals(
-            getSimpleName(typeElement.getSuperclass()),
-            typeElement.getSimpleName() + SUFFIX_SUPERCLASS)) {
-          final List<? extends TypeMirror> superclassTypeArguments =
-              getTypeArguments(typeElement.getSuperclass());
-          if (superclassTypeArguments.isEmpty() == false) {
-            w.append(
-                Stream.concat(
-                        typeVariableElements
-                            .stream()
-                            .map(Element::getSimpleName)
-                            .map(Object::toString),
-                        IntStream.range(typeVariableElements.size(), superclassTypeArguments.size())
-                            .mapToObj(it -> "G_" + it))
-                    .collect(Collectors.joining(", ", "<", ">")));
-            final TypeMirror superclassTypeMirror =
-                superclassTypeArguments.get(superclassTypeArguments.size() - 1);
-            if (getQualifiedName(superclassTypeMirror) != null) {
-              w.append(
-                  String.format(
-                      " extends %s%s",
-                      getQualifiedName(superclassTypeMirror),
-                      getTypeArguments(superclassTypeMirror)
-                          .stream()
-                          .map(
-                              it ->
-                                  it instanceof TypeVariable
-                                      ? ((TypeVariable) it).asElement().getSimpleName()
-                                      : getQualifiedName(it))
-                          .map(Objects::toString)
-                          .collect(Collectors.joining(", ", "<", ">"))));
-            }
-          }
-        }
-        w.append(" {\n");
-        w.append(
-            String.format(
-                "public static %s%s%s newInstance() {\n", // TODO throws
-                typeVariableElements
-                    .stream()
-                    .map(Element::getSimpleName)
-                    .map(Object::toString)
-                    .collect(Collectors.joining(", ", "<", "> ")),
-                typeElement.getQualifiedName(),
-                typeVariableElements
-                    .stream()
-                    .map(Element::getSimpleName)
-                    .map(Object::toString)
-                    .collect(Collectors.joining(", ", "<", ">"))));
-        w.append(
-            String.format(
-                "return new %s%s%s();\n",
-                typeElement.getSimpleName(),
-                SUFFIX_SUBCLASS,
-                typeVariableElements
-                    .stream()
-                    .map(Element::getSimpleName)
-                    .map(Object::toString)
-                    .collect(Collectors.joining(", ", "<", ">"))));
-        w.append("}\n");
-        w.append("}\n");
+        ann.writePackage(w);
+        superGen.write(w);
         w.flush();
       }
     } catch (final IOException e) {
@@ -176,89 +386,111 @@ public class DispatchProcessor extends AbstractProcessor {
     }
   }
 
-  private void writeSubclass(TypeMirror typeMirror, SwitchSubclass subclass) {
-    Filer filer = processingEnv.getFiler();
+  final class GeneratedSubclass {
+    private final AnnotatedClass ann;
+    private final SwitchBlock block;
+
+    public GeneratedSubclass(final AnnotatedClass ann, final SwitchBlock block) {
+      this.ann = ann;
+      this.block = block;
+    }
+
+    void write(Writer w) throws IOException {
+      w.append(String.format("final class %s", ann.getGeneratedSubclassSimpleName()));
+      writeClassTypeVariables(w, "", "");
+      writeExtends(w);
+      ann.startBlock(w);
+      for (final ExecutableElement constructor : ann.getAccessibleConstructors()) {
+        w.append(
+            constructor
+                .getModifiers()
+                .stream()
+                .map(Modifier::toString)
+                .collect(Collectors.joining(" ", "", " ")));
+        // TODO constructor's type variables
+        w.append(ann.getGeneratedSubclassSimpleName());
+        w.append(
+            String.format(
+                "(%s)%s",
+                ann.formatMethodParameters(constructor),
+                ann.formatMethodThrows(constructor, " ", "")));
+        ann.startBlock(w);
+        w.append(String.format("super(%s);\n", ann.formatMethodArguments(constructor)));
+        ann.endBlock(w);
+      }
+      w.append("@Override\n");
+      final ExecutableElement method = block.switchParameter.methodInType.methodElement;
+      w.append(
+          String.format(
+              "%s%s %s(%s)", // TODO type variables & throws
+              method
+                  .getModifiers()
+                  .stream()
+                  .filter(it -> it != Modifier.ABSTRACT)
+                  .map(it -> it.toString())
+                  .collect(Collectors.joining(" ", "", " ")),
+              method.getReturnType().getKind() == TypeKind.VOID
+                  ? "void"
+                  : asTypeElement(method.getReturnType()).getQualifiedName(),
+              method.getSimpleName(),
+              method
+                  .getParameters()
+                  .stream()
+                  .map(it -> ann.formatMethodParameters(method))
+                  .collect(Collectors.joining(", "))));
+      ann.startBlock(w);
+      w.append(
+          block
+              .caseParameters
+              .stream()
+              .map(
+                  it ->
+                      String.format(
+                          "if (%s instanceof %s) {\n%s(%s);\n}",
+                          block.switchParameter.variableElement.getSimpleName(),
+                          asTypeElement(it.variableElement.asType()).getQualifiedName(),
+                          it.methodInType.methodElement.getSimpleName(),
+                          method
+                              .getParameters()
+                              .stream()
+                              .map(
+                                  it2 ->
+                                      it2 == block.switchParameter.variableElement
+                                          ? String.format(
+                                              "(%s) %s",
+                                              asTypeElement(it.variableElement.asType())
+                                                  .getQualifiedName(),
+                                              it2.getSimpleName())
+                                          : it2.getSimpleName())
+                              .map(Object::toString)
+                              .collect(Collectors.joining(", "))))
+              .collect(Collectors.joining(" else ", "", "\n")));
+      ann.endBlock(w);
+      ann.endBlock(w);
+    }
+
+    private void writeClassTypeVariables(Writer w, String prefix, String suffix)
+        throws IOException {
+      ann.writeClassTypeVariables(w, 0, prefix, suffix);
+    }
+
+    private void writeExtends(Writer w) throws IOException {
+      w.write(" extends ");
+      w.append(ann.typeElement.getQualifiedName());
+      writeClassTypeVariables(w, "", "");
+    }
+  }
+
+  private void writeSubclass(TypeElement typeElement, SwitchBlock block) {
+    final AnnotatedClass ann = new AnnotatedClass(typeElement);
+    final GeneratedSubclass subGen = new GeneratedSubclass(ann, block);
     try {
-      final TypeElement typeElement = asTypeElement(typeMirror);
-      final FileObject fileObject =
-          filer.createSourceFile(typeElement.getQualifiedName() + SUFFIX_SUBCLASS);
-      final PackageElement packageElement =
-          processingEnv.getElementUtils().getPackageOf(typeElement);
+      final FileObject fileObject = ann.createSourceFile(SUFFIX_SUBCLASS);
       try (final BufferedWriter w =
           new BufferedWriter(
               new OutputStreamWriter(fileObject.openOutputStream(), StandardCharsets.UTF_8))) {
-        if (packageElement.isUnnamed() == false) {
-          w.append(String.format("package %s;\n", packageElement.getQualifiedName()));
-        }
-        final String typeVariableNames =
-            getTypeArguments(typeMirror)
-                .stream()
-                .filter(TypeVariable.class::isInstance)
-                .map(TypeVariable.class::cast)
-                .map(TypeVariable::asElement)
-                .map(Element::getSimpleName)
-                .map(Object::toString)
-                .collect(Collectors.joining(", ", "<", ">"));
-        w.append(
-            String.format(
-                "final class %s%s%s extends %s%s {\n",
-                typeElement.getSimpleName(),
-                SUFFIX_SUBCLASS,
-                typeVariableNames,
-                typeElement.getQualifiedName(),
-                typeVariableNames));
-        w.append("@Override\n");
-        final ExecutableElement method =
-            (ExecutableElement) subclass.switchParameter.getEnclosingElement();
-        w.append(
-            String.format(
-                "%s%s %s(%s) {\n", // TODO throws
-                method
-                    .getModifiers()
-                    .stream()
-                    .filter(it -> it != Modifier.ABSTRACT)
-                    .map(it -> it.toString())
-                    .collect(Collectors.joining(" ", "", " ")),
-                method.getReturnType().getKind() == TypeKind.VOID
-                    ? "void"
-                    : asTypeElement(method.getReturnType()).getQualifiedName(),
-                method.getSimpleName(),
-                method
-                    .getParameters()
-                    .stream()
-                    .map(
-                        it ->
-                            String.format(
-                                "final %s %s",
-                                asTypeElement(it.asType()).getQualifiedName(), it.getSimpleName()))
-                    .collect(Collectors.joining(", "))));
-        w.append(
-            subclass
-                .caseParameters
-                .stream()
-                .map(
-                    it ->
-                        String.format(
-                            "if (%s instanceof %s) {\n%s(%s);\n}",
-                            subclass.switchParameter.getSimpleName(),
-                            asTypeElement(it.asType()).getQualifiedName(),
-                            ((ExecutableElement) it.getEnclosingElement()).getSimpleName(),
-                            method
-                                .getParameters()
-                                .stream()
-                                .map(
-                                    it2 ->
-                                        it2 == subclass.switchParameter
-                                            ? String.format(
-                                                "(%s) %s",
-                                                asTypeElement(it.asType()).getQualifiedName(),
-                                                it2.getSimpleName())
-                                            : it2.getSimpleName())
-                                .map(Object::toString)
-                                .collect(Collectors.joining(", "))))
-                .collect(Collectors.joining(" else ", "", "\n")));
-        w.append("}\n");
-        w.append("}\n");
+        ann.writePackage(w);
+        subGen.write(w);
         w.flush();
       }
     } catch (final IOException e) {
@@ -266,193 +498,254 @@ public class DispatchProcessor extends AbstractProcessor {
     }
   }
 
-  private static final class SwitchSubclass {
-    private VariableElement switchParameter;
-    private Set<VariableElement> caseParameters;
+  private static final class SwitchBlock {
+    private final ParameterInMethod switchParameter;
+    private final Set<ParameterInMethod> caseParameters;
 
-    public SwitchSubclass() {
+    public SwitchBlock() {
+      this(null);
+    }
+
+    public SwitchBlock(final ParameterInMethod switchParameter) {
+      this.switchParameter = switchParameter;
       this.caseParameters = new HashSet<>();
     }
 
-    public void addSwitchParameter(final VariableElement switchParameter) {
-      if (switchParameter == null) {
-        return;
-      }
-      assert this.switchParameter == null;
-      this.switchParameter = switchParameter;
-    }
-
-    public void addCaseParameter(final VariableElement caseParameter) {
+    public void addCaseParameter(final ParameterInMethod caseParameter) {
       this.caseParameters.add(caseParameter);
     }
 
-    public void drainTo(final SwitchSubclass other) {
-      other.addSwitchParameter(switchParameter);
-      for (final VariableElement caseParameter : caseParameters) {
+    public void copyCaseParametersTo(final SwitchBlock other) {
+      for (final ParameterInMethod caseParameter : caseParameters) {
         other.addCaseParameter(caseParameter);
       }
     }
 
     @Override
     public String toString() {
-      return String.format(
-          "%s: %s %s => %s",
-          switchParameter == null
-              ? ""
-              : switchParameter.getEnclosingElement().getEnclosingElement().asType(),
-          switchParameter == null ? "" : switchParameter.getEnclosingElement().asType(),
-          switchParameter,
-          caseParameters
-              .stream()
-              .map(
-                  it ->
-                      String.format(
-                          "%s: %s %s",
-                          it.getEnclosingElement().getEnclosingElement().asType(),
-                          it.getEnclosingElement().asType(),
-                          it))
-              .collect(Collectors.joining(", ", "[", "]")));
+      return String.format("%s => %s", switchParameter, caseParameters);
     }
   }
 
   private void processAnnotations(
       Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
-    final Map<TypeMirror, SwitchSubclass> subclasses = new HashMap<>();
+    final Map<TypeElement, SwitchBlock> blocks = new HashMap<>();
     log(annotations.toString());
     final Set<? extends Element> switchElements = roundEnv.getElementsAnnotatedWith(Switch.class);
     log(switchElements.toString());
     for (final Element e : switchElements) {
-      final VariableElement switchParameter = getSuitableSwitchParameter((VariableElement) e);
-      if (switchParameter == null) {
+      final ParameterInMethod switchParameter = new ParameterInMethod((VariableElement) e);
+      if (switchParameter.isGoodSwitch() == false) {
         continue;
       }
-      final TypeElement typeElement = getEnclosingTypeElement(switchParameter);
-      final SwitchSubclass subclass =
-          subclasses.computeIfAbsent(typeElement.asType(), key -> new SwitchSubclass());
-      subclass.addSwitchParameter(switchParameter);
+      final TypeElement typeElement = switchParameter.methodInType.typeElement;
+      if (blocks.remove(typeElement) != null) {
+        fatalError("Limitation: no more than one switch per class is allowed");
+        continue;
+      }
+      blocks.put(typeElement, new SwitchBlock(switchParameter));
     }
     final Set<? extends Element> caseElements = roundEnv.getElementsAnnotatedWith(Case.class);
     log(caseElements.toString());
     for (final Element e : caseElements) {
-      final VariableElement caseParameter = getSuitableCaseParameter((VariableElement) e);
-      if (caseParameter == null) {
+      final ParameterInMethod caseParameter =
+          new ParameterInMethod((VariableElement) e).getGoodCase();
+      if (caseParameter.isGoodCase() == false) {
         continue;
       }
-      final TypeElement typeElement = getEnclosingTypeElement(caseParameter);
-      final SwitchSubclass subclass =
-          subclasses.computeIfAbsent(typeElement.asType(), key -> new SwitchSubclass());
-      subclass.addCaseParameter(caseParameter);
+      final TypeElement typeElement = caseParameter.methodInType.typeElement;
+      final SwitchBlock block = blocks.computeIfAbsent(typeElement, key -> new SwitchBlock());
+      block.addCaseParameter(caseParameter);
     }
-    final var visitedSubclassMirrors = new HashSet<TypeMirror>();
-    subclasses.forEach(
-        (typeMirror, subclass) -> {
-          if (visitedSubclassMirrors.contains(typeMirror)) {
-            return;
-          }
-          final Deque<SwitchSubclass> visitedSuperSubclasses = new LinkedList<>();
-          visitedSuperSubclasses.add(subclass);
-          TypeMirror superclassMirror = getSuperclassMirror(typeMirror);
-          while (superclassMirror != null) {
-            final SwitchSubclass superSubclass = subclasses.get(superclassMirror);
-            if (superSubclass != null) {
-              visitedSuperSubclasses.forEach(it -> superSubclass.drainTo(it));
-              visitedSuperSubclasses.push(superSubclass);
-            }
-            if (visitedSubclassMirrors.add(superclassMirror) == false) {
-              break;
-            }
-            superclassMirror = getSuperclassMirror(superclassMirror);
-          }
+    final var visitedElements = new HashSet<TypeElement>();
+    for (final Map.Entry<TypeElement, SwitchBlock> e : blocks.entrySet()) {
+      final TypeElement typeElement = e.getKey();
+      final SwitchBlock block = e.getValue();
+      if (visitedElements.contains(typeElement) || block.switchParameter == null) {
+        continue;
+      }
+      final var visitedSuperBlocks = new LinkedList<SwitchBlock>();
+      visitedSuperBlocks.add(block);
+      getExistingSuperclass(typeElement)
+          .accept(
+              new SimpleTypeVisitor9<Void, TypeElement>() {
+                @Override
+                public Void visitDeclared(DeclaredType t, TypeElement p) {
+                  final TypeElement typeElement = asElement(t);
+                  final SwitchBlock superBlock = blocks.get(typeElement);
+                  if (superBlock != null) {
+                    visitedSuperBlocks.forEach(it -> superBlock.copyCaseParametersTo(it));
+                    visitedSuperBlocks.push(superBlock);
+                  }
+                  if (visitedElements.add(typeElement) == false) {
+                    return super.visitDeclared(t, p);
+                  }
+                  return getExistingSuperclass(typeElement).accept(this, p);
+                }
+              },
+              typeElement);
+    }
+    blocks.values().removeIf(it -> it.switchParameter == null);
+    blocks.forEach(
+        (typeElement, subclass) -> {
+          writeSuperclass(typeElement);
+          writeSubclass(typeElement, subclass);
         });
-    subclasses.forEach(
-        (typeMirror, subclass) -> {
-          writeSuperclass(typeMirror);
-          writeSubclass(typeMirror, subclass);
-        });
   }
 
-  private VariableElement getSuitableSwitchParameter(VariableElement parameter) {
-    final ExecutableElement methodElement = (ExecutableElement) parameter.getEnclosingElement();
-    final int parameterIndex = methodElement.getParameters().indexOf(parameter);
-    TypeElement typeElement = getEnclosingTypeElement(methodElement);
-    if (isAbstractElement(typeElement) && isAbstractElement(methodElement)) {
-      return parameter;
+  private final class ParameterInMethod {
+    final MethodInType methodInType;
+    final VariableElement variableElement;
+
+    ParameterInMethod(final VariableElement variableElement) {
+      this.methodInType =
+          new MethodInType((ExecutableElement) variableElement.getEnclosingElement());
+      this.variableElement = variableElement;
     }
-    final ExecutableElement superMethod =
-        findOverridableMethod(
-            methodElement,
-            it -> isAbstractElement(it) && isAbstractElement(getEnclosingTypeElement(it)));
-    if (superMethod == null) {
-      log(
-          String.format(
-              "%s (featuring a Switch annotation on %s) is not overridable",
-              typeElement, methodElement));
-      return null;
+
+    ParameterInMethod(final MethodInType methodInType, final VariableElement variableElement) {
+      this.methodInType = methodInType;
+      this.variableElement = variableElement;
     }
-    return superMethod.getParameters().get(parameterIndex);
+
+    private boolean isGoodSwitch(final MethodInType methodInType) {
+      return isAbstractElement(methodInType.typeElement)
+          && isAbstractElement(methodInType.methodElement);
+    }
+
+    private boolean isGoodSwitch() {
+      return isGoodSwitch(methodInType);
+    }
+
+    boolean isGoodCase(final MethodInType methodInType) {
+      return isAbstractElement(methodInType.typeElement);
+    }
+
+    boolean isGoodCase() {
+      return isGoodCase(methodInType);
+    }
+
+    ParameterInMethod getGoodCase() {
+      if (isGoodCase()) {
+        return this;
+      }
+      final MethodInType overridable = methodInType.findOverridable(this::isGoodCase);
+      final int parameterIndex = methodInType.getMethodParameters().indexOf(variableElement);
+      final VariableElement overridableVariableElement =
+          overridable.getMethodParameters().get(parameterIndex);
+      return new ParameterInMethod(overridable, overridableVariableElement);
+    }
+
+    @Override
+    public String toString() {
+      return String.format("%s(%s)", methodInType, variableElement);
+    }
   }
 
-  private VariableElement getSuitableCaseParameter(VariableElement parameter) {
-    final ExecutableElement methodElement = (ExecutableElement) parameter.getEnclosingElement();
-    final int parameterIndex = methodElement.getParameters().indexOf(parameter);
-    final TypeElement typeElement = getEnclosingTypeElement(methodElement);
-    if (isAbstractElement(typeElement)) {
-      return parameter;
-    }
-    final ExecutableElement superMethod =
-        findOverridableMethod(methodElement, it -> isAbstractElement(getEnclosingTypeElement(it)));
-    if (superMethod == null) {
-      log(
-          String.format(
-              "%s (featuring a Case annotation on %s) is not overridable",
-              typeElement, methodElement));
-      return null;
-    }
-    return superMethod.getParameters().get(parameterIndex);
+  private TypeElement asElement(DeclaredType t) {
+    return (TypeElement) t.asElement();
   }
 
-  private ExecutableElement findOverridableMethod(
-      ExecutableElement overrider, Predicate<ExecutableElement> methodPredicate) {
-    TypeElement classElement = getEnclosingTypeElement(overrider);
-    while ((classElement = asTypeElement(getSuperclassMirror(classElement.asType()))) != null) {
-      for (final Element method : classElement.getEnclosedElements()) {
-        if (method instanceof ExecutableElement == false) {
-          continue;
+  private TypeParameterElement asElement(TypeVariable t) {
+    return (TypeParameterElement) t.asElement();
+  }
+
+  private final class MethodInType {
+    final TypeElement typeElement;
+    final ExecutableElement methodElement;
+
+    MethodInType(final ExecutableElement methodElement) {
+      this(getEnclosingTypeElement(methodElement), methodElement);
+    }
+
+    MethodInType(final TypeElement typeElement, final ExecutableElement methodElement) {
+      this.typeElement = typeElement;
+      this.methodElement = methodElement;
+    }
+
+    List<? extends VariableElement> getMethodParameters() {
+      return methodElement.getParameters();
+    }
+
+    private class MethodVisitor extends SimpleElementVisitor9<MethodInType, TypeElement> {
+      private final Predicate<MethodInType> predicate;
+
+      public MethodVisitor(final Predicate<MethodInType> predicate) {
+        super(MethodInType.this);
+        this.predicate = predicate;
+      }
+
+      @Override
+      public MethodInType visitExecutable(ExecutableElement e, TypeElement p) {
+        if (processingEnv.getElementUtils().overrides(DEFAULT_VALUE.methodElement, e, p)) {
+          final MethodInType result = new MethodInType(p, e);
+          if (predicate.test(result)) {
+            return result;
+          }
         }
-        if (this.processingEnv
-                .getElementUtils()
-                .overrides(overrider, (ExecutableElement) method, classElement)
-            == false) {
-          continue;
-        }
-        if (methodPredicate.test((ExecutableElement) method)) {
-          return (ExecutableElement) method;
-        }
+        return null;
       }
     }
-    return null;
+
+    MethodInType findOverridable(Predicate<MethodInType> predicate) {
+      final MethodVisitor methodVisitor = new MethodVisitor(predicate);
+      return getExistingSuperclass(typeElement)
+          .accept(
+              new SimpleTypeVisitor9<>(this) {
+                @Override
+                public MethodInType visitDeclared(DeclaredType declaredType, MethodInType p) {
+                  final TypeElement typeElement = asElement(declaredType);
+                  for (final Element element : typeElement.getEnclosedElements()) {
+                    final MethodInType result = element.accept(methodVisitor, typeElement);
+                    if (result != null) {
+                      return result;
+                    }
+                  }
+                  return getExistingSuperclass(typeElement).accept(this, p);
+                }
+              },
+              this);
+    }
+
+    @Override
+    public String toString() {
+      return String.format("%s::%s", typeElement, methodElement);
+    }
   }
 
-  private TypeElement getEnclosingTypeElement(Element element) {
-    Element enclosingElement = element;
-    do {
-      enclosingElement = enclosingElement.getEnclosingElement();
-      if (enclosingElement == null) {
-        throw new IllegalStateException("No classes are enclosing an " + element);
-      }
-    } while (enclosingElement instanceof TypeElement == false);
-    return (TypeElement) enclosingElement;
+  private TypeElement getEnclosingTypeElement(final Element element) {
+    final TypeElement typeElement =
+        element.accept(
+            new SimpleElementVisitor9<TypeElement, TypeElement>() {
+              @Override
+              public TypeElement visitModule(ModuleElement e, TypeElement p) {
+                return p;
+              }
+
+              @Override
+              public TypeElement visitPackage(PackageElement e, TypeElement p) {
+                return p;
+              }
+
+              @Override
+              public TypeElement visitType(TypeElement e, TypeElement p) {
+                return e;
+              }
+
+              @Override
+              protected TypeElement defaultAction(Element e, TypeElement p) {
+                return e.getEnclosingElement().accept(this, p);
+              }
+            },
+            null);
+    if (typeElement == null) {
+      throw new IllegalStateException("No classes are enclosing an " + element);
+    }
+    return typeElement;
   }
 
   private boolean isAbstractElement(final Element method) {
     return method.getModifiers().contains(Modifier.ABSTRACT);
-  }
-
-  private DeclaredType asDeclaredType(final TypeMirror typeMirror) {
-    if (typeMirror instanceof DeclaredType) {
-      return (DeclaredType) typeMirror;
-    }
-    return null;
   }
 
   private List<? extends TypeMirror> getTypeArguments(final TypeMirror typeMirror) {
@@ -463,20 +756,9 @@ public class DispatchProcessor extends AbstractProcessor {
     return declaredType.getTypeArguments();
   }
 
-  private String getSimpleName(final TypeMirror typeMirror) {
-    final TypeElement typeElement = asTypeElement(typeMirror);
-    if (typeElement == null) {
-      return null;
-    }
+  private String getSimpleName(final DeclaredType declaredType) {
+    final TypeElement typeElement = asElement(declaredType);
     return typeElement.getSimpleName().toString();
-  }
-
-  private String getQualifiedName(final TypeMirror typeMirror) {
-    final TypeElement typeElement = asTypeElement(typeMirror);
-    if (typeElement == null) {
-      return null;
-    }
-    return typeElement.getQualifiedName().toString();
   }
 
   private TypeElement asTypeElement(final TypeMirror typeMirror) {
@@ -487,24 +769,91 @@ public class DispatchProcessor extends AbstractProcessor {
     return (TypeElement) declaredType.asElement();
   }
 
-  private TypeMirror getSuperclassMirror(TypeMirror type) {
-    final DeclaredType declaredType = asDeclaredType(asTypeElement(type).getSuperclass());
-    if (declaredType == null) {
-      return null;
+  private DeclaredType asDeclaredType(final TypeMirror typeMirror) {
+    return typeMirror.accept(
+        new SimpleTypeVisitor9<DeclaredType, TypeMirror>() {
+          @Override
+          public DeclaredType visitDeclared(DeclaredType t, TypeMirror p) {
+            return t;
+          }
+
+          @Override
+          public DeclaredType visitError(ErrorType t, TypeMirror p) {
+            return visitDeclared(t, p);
+          }
+        },
+        typeMirror);
+  }
+
+  /**
+   * Returns the direct superclass of this type element. If this type element represents an
+   * interface or the class java.lang.Object, then a NoType with kind NONE is returned.
+   *
+   * @return the direct superclass, or a NoType if there is none
+   */
+  private TypeMirror getSuperclass(final TypeElement typeElement) {
+    return typeElement
+        .getSuperclass()
+        .accept(
+            new SimpleTypeVisitor9<TypeMirror, TypeElement>(noneNoType()) {
+              @Override
+              public TypeMirror visitDeclared(DeclaredType t, TypeElement p) {
+                return t;
+              }
+
+              @Override
+              public TypeMirror visitError(ErrorType t, TypeElement p) {
+                return visitDeclared(t, p);
+              }
+            },
+            typeElement);
+  }
+
+  final class ExistingSuperclassTypeVisitor extends SimpleTypeVisitor9<TypeMirror, TypeElement> {
+    public ExistingSuperclassTypeVisitor() {
+      super(noneNoType());
     }
-    final TypeElement typeElement;
-    if (declaredType.asElement().getSimpleName().toString().endsWith(SUFFIX_SUPERCLASS)
-        && declaredType.getTypeArguments().isEmpty() == false) {
-      typeElement =
-          asTypeElement(
-              declaredType.getTypeArguments().get(declaredType.getTypeArguments().size() - 1));
-    } else {
-      typeElement = (TypeElement) declaredType.asElement();
+
+    @Override
+    public TypeMirror visitDeclared(DeclaredType t, TypeElement subclassTypeElement) {
+      if (getSimpleName(t).endsWith(SUFFIX_SUPERCLASS) && t.getTypeArguments().isEmpty() == false) {
+        return t.getTypeArguments()
+            .get(t.getTypeArguments().size() - 1)
+            .accept(
+                new SimpleTypeVisitor9<TypeMirror, TypeElement>(DEFAULT_VALUE) {
+                  @Override
+                  public TypeMirror visitDeclared(DeclaredType t, TypeElement subclassTypeElement) {
+                    return t;
+                  }
+                },
+                asElement(t));
+      }
+      return t;
     }
-    if (typeElement == null) {
-      return null;
+
+    @Override
+    public TypeMirror visitError(ErrorType t, TypeElement p) {
+      return visitDeclared(t, p);
     }
-    return typeElement.asType();
+  }
+
+  /**
+   * Returns the direct superclass (that is not being generated by this processor) of this type
+   * element. If this type element represents an interface or the class java.lang.Object, then a
+   * NoType with kind NONE is returned.
+   *
+   * @return the direct superclass, or a NoType if there is none
+   */
+  private TypeMirror getExistingSuperclass(TypeElement typeElement) {
+    return getSuperclass(typeElement).accept(new ExistingSuperclassTypeVisitor(), typeElement);
+  }
+
+  private Name emptyName() {
+    return processingEnv.getElementUtils().getName("");
+  }
+
+  private NoType noneNoType() {
+    return processingEnv.getTypeUtils().getNoType(TypeKind.NONE);
   }
 
   private void log(String msg) {
