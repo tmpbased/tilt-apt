@@ -1,6 +1,5 @@
 package tilt.apt.dispatch.processor;
 
-import com.google.auto.service.AutoService;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
@@ -15,10 +14,10 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.Optional;
 import java.util.Set;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+import java.util.stream.IntStream;
 import java.util.stream.Stream;
 import javax.annotation.processing.AbstractProcessor;
 import javax.annotation.processing.Filer;
@@ -28,7 +27,6 @@ import javax.annotation.processing.SupportedOptions;
 import javax.lang.model.SourceVersion;
 import javax.lang.model.element.AnnotationMirror;
 import javax.lang.model.element.Element;
-import javax.lang.model.element.ElementKind;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.PackageElement;
@@ -37,8 +35,10 @@ import javax.lang.model.element.VariableElement;
 import javax.lang.model.type.DeclaredType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
+import javax.lang.model.type.TypeVariable;
 import javax.tools.Diagnostic.Kind;
 import javax.tools.FileObject;
+import com.google.auto.service.AutoService;
 import tilt.apt.dispatch.annotations.Case;
 import tilt.apt.dispatch.annotations.Switch;
 
@@ -101,29 +101,72 @@ public class DispatchProcessor extends AbstractProcessor {
         }
         w.append(
             String.format("abstract class %s%s", typeElement.getSimpleName(), SUFFIX_SUPERCLASS));
+        final List<? extends Element> typeVariableElements =
+            getTypeArguments(typeMirror)
+                .stream()
+                .filter(TypeVariable.class::isInstance)
+                .map(TypeVariable.class::cast)
+                .map(TypeVariable::asElement)
+                .collect(Collectors.toList());
         if (Objects.equals(
             getSimpleName(typeElement.getSuperclass()),
             typeElement.getSimpleName() + SUFFIX_SUPERCLASS)) {
-          final List<? extends TypeMirror> typeArguments =
+          final List<? extends TypeMirror> superclassTypeArguments =
               getTypeArguments(typeElement.getSuperclass());
-          if (typeArguments.isEmpty() == false) {
-            w.append("<T>");
-            final TypeMirror superclassTypeMirror = typeArguments.get(0);
+          if (superclassTypeArguments.isEmpty() == false) {
+            w.append(
+                Stream.concat(
+                        typeVariableElements
+                            .stream()
+                            .map(Element::getSimpleName)
+                            .map(Object::toString),
+                        IntStream.range(typeVariableElements.size(), superclassTypeArguments.size())
+                            .mapToObj(it -> "G_" + it))
+                    .collect(Collectors.joining(", ", "<", ">")));
+            final TypeMirror superclassTypeMirror =
+                superclassTypeArguments.get(superclassTypeArguments.size() - 1);
             if (getQualifiedName(superclassTypeMirror) != null) {
-              w.append(String.format(" extends %s", getQualifiedName(superclassTypeMirror)));
+              w.append(
+                  String.format(
+                      " extends %s%s",
+                      getQualifiedName(superclassTypeMirror),
+                      getTypeArguments(superclassTypeMirror)
+                          .stream()
+                          .map(
+                              it ->
+                                  it instanceof TypeVariable
+                                      ? ((TypeVariable) it).asElement().getSimpleName()
+                                      : getQualifiedName(it))
+                          .map(Objects::toString)
+                          .collect(Collectors.joining(", ", "<", ">"))));
             }
-            final List<? extends TypeMirror> otherTypeArguments =
-                typeArguments.subList(1, typeArguments.size());
-            // TODO
           }
         }
         w.append(" {\n");
         w.append(
             String.format(
-                "public static %s newInstance() {\n", // TODO throws
-                typeElement.getQualifiedName()));
+                "public static %s%s%s newInstance() {\n", // TODO throws
+                typeVariableElements
+                    .stream()
+                    .map(Element::getSimpleName)
+                    .map(Object::toString)
+                    .collect(Collectors.joining(", ", "<", "> ")),
+                typeElement.getQualifiedName(),
+                typeVariableElements
+                    .stream()
+                    .map(Element::getSimpleName)
+                    .map(Object::toString)
+                    .collect(Collectors.joining(", ", "<", ">"))));
         w.append(
-            String.format("return new %s%s();\n", typeElement.getSimpleName(), SUFFIX_SUBCLASS));
+            String.format(
+                "return new %s%s%s();\n",
+                typeElement.getSimpleName(),
+                SUFFIX_SUBCLASS,
+                typeVariableElements
+                    .stream()
+                    .map(Element::getSimpleName)
+                    .map(Object::toString)
+                    .collect(Collectors.joining(", ", "<", ">"))));
         w.append("}\n");
         w.append("}\n");
         w.flush();
@@ -147,10 +190,23 @@ public class DispatchProcessor extends AbstractProcessor {
         if (packageElement.isUnnamed() == false) {
           w.append(String.format("package %s;\n", packageElement.getQualifiedName()));
         }
+        final String typeVariableNames =
+            getTypeArguments(typeMirror)
+                .stream()
+                .filter(TypeVariable.class::isInstance)
+                .map(TypeVariable.class::cast)
+                .map(TypeVariable::asElement)
+                .map(Element::getSimpleName)
+                .map(Object::toString)
+                .collect(Collectors.joining(", ", "<", ">"));
         w.append(
             String.format(
-                "final class %s%s extends %s {\n",
-                typeElement.getSimpleName(), SUFFIX_SUBCLASS, typeElement.getQualifiedName()));
+                "final class %s%s%s extends %s%s {\n",
+                typeElement.getSimpleName(),
+                SUFFIX_SUBCLASS,
+                typeVariableNames,
+                typeElement.getQualifiedName(),
+                typeVariableNames));
         w.append("@Override\n");
         final ExecutableElement method =
             (ExecutableElement) subclass.switchParameter.getEnclosingElement();
@@ -439,7 +495,9 @@ public class DispatchProcessor extends AbstractProcessor {
     final TypeElement typeElement;
     if (declaredType.asElement().getSimpleName().toString().endsWith(SUFFIX_SUPERCLASS)
         && declaredType.getTypeArguments().isEmpty() == false) {
-      typeElement = asTypeElement(declaredType.getTypeArguments().get(0));
+      typeElement =
+          asTypeElement(
+              declaredType.getTypeArguments().get(declaredType.getTypeArguments().size() - 1));
     } else {
       typeElement = (TypeElement) declaredType.asElement();
     }
