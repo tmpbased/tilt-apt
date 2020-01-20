@@ -1,6 +1,5 @@
 package tilt.apt.dispatch.processor;
 
-import com.google.auto.service.AutoService;
 import java.io.BufferedWriter;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
@@ -32,7 +31,6 @@ import javax.lang.model.element.Element;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.ModuleElement;
-import javax.lang.model.element.Name;
 import javax.lang.model.element.PackageElement;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.TypeParameterElement;
@@ -51,6 +49,7 @@ import javax.lang.model.util.SimpleElementVisitor9;
 import javax.lang.model.util.SimpleTypeVisitor9;
 import javax.tools.Diagnostic.Kind;
 import javax.tools.FileObject;
+import com.google.auto.service.AutoService;
 import tilt.apt.dispatch.annotations.Case;
 import tilt.apt.dispatch.annotations.Switch;
 
@@ -97,6 +96,13 @@ public class DispatchProcessor extends AbstractProcessor {
     return true;
   }
 
+  private static <T> List<T> concat(final List<? extends T> a, final List<? extends T> b) {
+    final List<T> c = new ArrayList<>(a.size() + b.size());
+    c.addAll(a);
+    c.addAll(b);
+    return Collections.unmodifiableList(c);
+  }
+
   private final class AnnotatedClass {
     private final TypeElement typeElement;
 
@@ -133,22 +139,8 @@ public class DispatchProcessor extends AbstractProcessor {
       return typeElement.getTypeParameters();
     }
 
-    void writeSuperclassTypeParameterElements(Writer w, int stubCount, String prefix, String suffix)
-        throws IOException {
-      final List<? extends TypeParameterElement> typeParameterElements = getTypeParameterElements();
-      if (typeParameterElements.isEmpty()) {
-        return;
-      }
-      w.append(
-          Stream.concat(
-                  typeParameterElements
-                      .stream()
-                      .map(Element::asType)
-                      .map(it -> it.accept(new TypeParameterNameVisitor(), null))
-                      .filter(Objects::nonNull),
-                  IntStream.range(typeParameterElements.size(), stubCount)
-                      .mapToObj(it -> "Stub_" + it))
-              .collect(Collectors.joining(", ", prefix + "<", ">" + suffix)));
+    Stream<String> typeNames(Stream<? extends Element> elements, TypeVisitor<String, ?> visitor) {
+      return elements.map(e -> e.asType().accept(visitor, null)).filter(Objects::nonNull);
     }
 
     void writeTypeParameterElements(
@@ -161,12 +153,19 @@ public class DispatchProcessor extends AbstractProcessor {
       if (typeParameterElements.isEmpty()) {
         return;
       }
-      w.append(
-          typeParameterElements
-              .stream()
-              .map(e -> e.asType().accept(visitor, null))
-              .filter(Objects::nonNull)
-              .collect(Collectors.joining(", ", prefix + "<", ">" + suffix)));
+      writeTypeParameterElements(
+          w,
+          typeNames(typeParameterElements.stream(), visitor).collect(Collectors.toList()),
+          prefix,
+          suffix);
+    }
+
+    void writeTypeParameterElements(
+        Writer w, List<? extends String> names, String prefix, String suffix) throws IOException {
+      if (names.isEmpty()) {
+        return;
+      }
+      w.append(names.stream().collect(Collectors.joining(", ", prefix + "<", ">" + suffix)));
     }
 
     List<? extends ExecutableElement> getAccessibleConstructors() {
@@ -230,14 +229,19 @@ public class DispatchProcessor extends AbstractProcessor {
   final class TypeArgumentNameVisitor extends SimpleTypeVisitor9<String, Void> {
     @Override
     public String visitDeclared(DeclaredType t, Void p) {
-      return asElement(t).getQualifiedName()
-          + (t.getTypeArguments().isEmpty()
-              ? ""
-              : t.getTypeArguments()
-                  .stream()
-                  .map(it -> it.accept(this, null))
-                  .filter(Objects::nonNull)
-                  .collect(Collectors.joining(", ", "<", ">")));
+      return asElement(t).getQualifiedName() + formatTypeArguments(t);
+    }
+
+    private String formatTypeArguments(DeclaredType t) {
+      final List<? extends TypeMirror> typeArguments = t.getTypeArguments();
+      if (typeArguments.isEmpty()) {
+        return "";
+      }
+      return typeArguments
+          .stream()
+          .map(it -> it.accept(this, null))
+          .filter(Objects::nonNull)
+          .collect(Collectors.joining(", ", "<", ">"));
     }
 
     @Override
@@ -259,6 +263,15 @@ public class DispatchProcessor extends AbstractProcessor {
       final TypeMirror bound = t.getSuperBound();
       return bound == null ? "" : " super " + bound.accept(this, null);
     }
+
+    @Override
+    public String visitIntersection(IntersectionType t, Void p) {
+      return t.getBounds()
+          .stream()
+          .map(bound -> bound.accept(this, null))
+          .filter(Objects::nonNull)
+          .collect(Collectors.joining(" & "));
+    }
   }
 
   final class TypeParameterNameVisitor extends SimpleTypeVisitor9<String, Void> {
@@ -270,24 +283,12 @@ public class DispatchProcessor extends AbstractProcessor {
 
     @Override
     public String visitDeclared(DeclaredType t, Void p) {
-      return asElement(t).getQualifiedName() + getTypeArguments(t);
-    }
-
-    private String getTypeArguments(DeclaredType t) {
-      final List<? extends TypeMirror> typeArguments = t.getTypeArguments();
-      if (typeArguments.isEmpty()) {
-        return DEFAULT_VALUE;
-      }
-      return t.getTypeArguments()
-          .stream()
-          .map(it -> it.accept(argumentName, null))
-          .filter(Objects::nonNull)
-          .collect(Collectors.joining(", ", "<", ">"));
+      return asElement(t).getQualifiedName() + argumentName.formatTypeArguments(t);
     }
 
     @Override
     public String visitTypeVariable(TypeVariable t, Void p) {
-      final String upperBoundName = t.getUpperBound().accept(this, null);
+      final String upperBoundName = t.getUpperBound().accept(argumentName, null);
       return asElement(t).getSimpleName()
           + (upperBoundName == null || upperBoundName.equals("java.lang.Object")
               ? ""
@@ -298,7 +299,7 @@ public class DispatchProcessor extends AbstractProcessor {
     public String visitIntersection(IntersectionType t, Void p) {
       return t.getBounds()
           .stream()
-          .map(it -> it.accept(this, null))
+          .map(bound -> bound.accept(this, null))
           .filter(Objects::nonNull)
           .collect(Collectors.joining(" & "));
     }
@@ -339,8 +340,26 @@ public class DispatchProcessor extends AbstractProcessor {
 
     private void writeClassDecl(Writer w) throws IOException {
       w.append(String.format("abstract class %s", ac.getGeneratedSuperclassSimpleName()));
-      ac.writeSuperclassTypeParameterElements(w, declaredType.getTypeArguments().size(), "", "");
+      writeSuperclassTypeParameterElements(w);
       writeExtends(w);
+    }
+
+    private void writeSuperclassTypeParameterElements(Writer w) throws IOException {
+      final List<? extends TypeParameterElement> typeParameterElements =
+          ac.getTypeParameterElements();
+      final int stubCount = declaredType.getTypeArguments().size();
+      if (typeParameterElements.isEmpty() && stubCount == 0) {
+        return;
+      }
+      ac.writeTypeParameterElements(
+          w,
+          Stream.concat(
+                  ac.typeNames(typeParameterElements.stream(), new TypeParameterNameVisitor()),
+                  IntStream.range(typeParameterElements.size(), stubCount)
+                      .mapToObj(it -> "Stub_" + it))
+              .collect(Collectors.toList()),
+          "",
+          "");
     }
 
     private void writeFactoryMethodDecl(Writer w, final ExecutableElement constructor)
@@ -352,9 +371,7 @@ public class DispatchProcessor extends AbstractProcessor {
               .collect(Collectors.joining(" ", "", " ")));
       ac.writeTypeParameterElements(
           w,
-          Stream.of(constructor.getTypeParameters(), ac.getTypeParameterElements())
-              .flatMap(List::stream)
-              .collect(Collectors.toList()),
+          concat(ac.getTypeParameterElements(), constructor.getTypeParameters()),
           new TypeParameterNameVisitor(),
           "",
           " ");
@@ -449,7 +466,8 @@ public class DispatchProcessor extends AbstractProcessor {
 
     void write(Writer w) throws IOException {
       w.append(String.format("final class %s", an.getGeneratedSubclassSimpleName()));
-      writeClassTypeVariables(w, "", "");
+      an.writeTypeParameterElements(
+          w, an.getTypeParameterElements(), new TypeParameterNameVisitor(), "", "");
       writeExtends(w);
       an.startBlock(w);
       for (final ExecutableElement constructor : an.getAccessibleConstructors()) {
@@ -522,20 +540,16 @@ public class DispatchProcessor extends AbstractProcessor {
       an.endBlock(w);
     }
 
-    private void writeClassTypeVariables(Writer w, String prefix, String suffix)
-        throws IOException {
-      an.writeSuperclassTypeParameterElements(w, 0, prefix, suffix);
-    }
-
     private void writeExtends(Writer w) throws IOException {
       w.write(" extends ");
       w.append(an.typeElement.getQualifiedName());
-      writeClassTypeVariables(w, "", "");
+      an.writeTypeParameterElements(
+          w, an.getTypeParameterElements(), new TypeArgumentNameVisitor(), "", "");
     }
   }
 
-  private void writeSubclass(TypeElement typeElement, SwitchBlock block) {
-    final AnnotatedClass an = new AnnotatedClass(typeElement);
+  private void writeSubclass(SwitchBlock block) {
+    final AnnotatedClass an = new AnnotatedClass(block.typeElement);
     final GeneratedSubclass gs = new GeneratedSubclass(an, block);
     try {
       final FileObject fileObject = an.createSourceFile(SUFFIX_SUBCLASS);
@@ -552,14 +566,16 @@ public class DispatchProcessor extends AbstractProcessor {
   }
 
   private static final class SwitchBlock {
+    private final TypeElement typeElement;
     private final ParameterInMethod switchParameter;
     private final Set<ParameterInMethod> caseParameters;
 
-    public SwitchBlock() {
-      this(null);
+    public SwitchBlock(final TypeElement typeElement) {
+      this(typeElement, null);
     }
 
-    public SwitchBlock(final ParameterInMethod switchParameter) {
+    public SwitchBlock(final TypeElement typeElement, final ParameterInMethod switchParameter) {
+      this.typeElement = typeElement;
       this.switchParameter = switchParameter;
       this.caseParameters = new HashSet<>();
     }
@@ -582,7 +598,7 @@ public class DispatchProcessor extends AbstractProcessor {
 
   private void processAnnotations(
       Set<? extends TypeElement> annotations, RoundEnvironment roundEnv) {
-    final Map<TypeElement, SwitchBlock> blocks = new HashMap<>();
+    final Map<String, SwitchBlock> blocks = new HashMap<>();
     log(annotations.toString());
     final Set<? extends Element> switchElements = roundEnv.getElementsAnnotatedWith(Switch.class);
     log(switchElements.toString());
@@ -592,11 +608,12 @@ public class DispatchProcessor extends AbstractProcessor {
         continue;
       }
       final TypeElement typeElement = switchParameter.methodInType.typeElement;
-      if (blocks.remove(typeElement) != null) {
+      if (blocks.remove(typeElement.getQualifiedName().toString()) != null) {
         fatalError("Limitation: no more than one switch per class is allowed");
         continue;
       }
-      blocks.put(typeElement, new SwitchBlock(switchParameter));
+      blocks.put(
+          typeElement.getQualifiedName().toString(), new SwitchBlock(typeElement, switchParameter));
     }
     final Set<? extends Element> caseElements = roundEnv.getElementsAnnotatedWith(Case.class);
     log(caseElements.toString());
@@ -607,42 +624,45 @@ public class DispatchProcessor extends AbstractProcessor {
         continue;
       }
       final TypeElement typeElement = caseParameter.methodInType.typeElement;
-      final SwitchBlock block = blocks.computeIfAbsent(typeElement, key -> new SwitchBlock());
+      final SwitchBlock block =
+          blocks.computeIfAbsent(
+              typeElement.getQualifiedName().toString(), key -> new SwitchBlock(typeElement));
       block.addCaseParameter(caseParameter);
     }
-    final var visitedElements = new HashSet<TypeElement>();
-    for (final Map.Entry<TypeElement, SwitchBlock> e : blocks.entrySet()) {
-      final TypeElement typeElement = e.getKey();
+    final var visitedElements = new HashSet<String>();
+    for (final Map.Entry<String, SwitchBlock> e : blocks.entrySet()) {
+      final String key = e.getKey();
       final SwitchBlock block = e.getValue();
-      if (visitedElements.contains(typeElement) || block.switchParameter == null) {
+      if (visitedElements.contains(key) || block.switchParameter == null) {
         continue;
       }
       final var visitedSuperBlocks = new LinkedList<SwitchBlock>();
       visitedSuperBlocks.add(block);
-      getExistingSuperclass(typeElement)
+      getExistingSuperclass(block.typeElement)
           .accept(
               new SimpleTypeVisitor9<Void, TypeElement>() {
                 @Override
                 public Void visitDeclared(DeclaredType t, TypeElement p) {
                   final TypeElement typeElement = asElement(t);
-                  final SwitchBlock superBlock = blocks.get(typeElement);
+                  final String key = typeElement.getQualifiedName().toString();
+                  final SwitchBlock superBlock = blocks.get(key);
                   if (superBlock != null) {
                     visitedSuperBlocks.forEach(it -> superBlock.copyCaseParametersTo(it));
                     visitedSuperBlocks.push(superBlock);
                   }
-                  if (visitedElements.add(typeElement) == false) {
+                  if (visitedElements.add(key) == false) {
                     return super.visitDeclared(t, p);
                   }
                   return getExistingSuperclass(typeElement).accept(this, p);
                 }
               },
-              typeElement);
+              block.typeElement);
     }
     blocks.values().removeIf(it -> it.switchParameter == null);
     blocks.forEach(
-        (typeElement, subclass) -> {
-          writeSuperclass(typeElement);
-          writeSubclass(typeElement, subclass);
+        (key, block) -> {
+          writeSuperclass(block.typeElement);
+          writeSubclass(block);
         });
   }
 
@@ -801,14 +821,6 @@ public class DispatchProcessor extends AbstractProcessor {
     return method.getModifiers().contains(Modifier.ABSTRACT);
   }
 
-  private List<? extends TypeMirror> getTypeArguments(final TypeMirror typeMirror) {
-    final DeclaredType declaredType = asDeclaredType(typeMirror);
-    if (declaredType == null) {
-      return Collections.emptyList();
-    }
-    return declaredType.getTypeArguments();
-  }
-
   private String getSimpleName(final DeclaredType declaredType) {
     final TypeElement typeElement = asElement(declaredType);
     return typeElement.getSimpleName().toString();
@@ -899,10 +911,6 @@ public class DispatchProcessor extends AbstractProcessor {
    */
   private TypeMirror getExistingSuperclass(TypeElement typeElement) {
     return getSuperclass(typeElement).accept(new ExistingSuperclassTypeVisitor(), typeElement);
-  }
-
-  private Name emptyName() {
-    return processingEnv.getElementUtils().getName("");
   }
 
   private NoType noneNoType() {
