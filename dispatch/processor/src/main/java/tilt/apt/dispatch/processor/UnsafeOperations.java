@@ -1,6 +1,6 @@
 package tilt.apt.dispatch.processor;
 
-import static tilt.apt.dispatch.processor.SafeCasts.asElement;
+import static tilt.apt.dispatch.processor.SafeOperations.asElement;
 
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.type.DeclaredType;
@@ -8,7 +8,7 @@ import javax.lang.model.type.ErrorType;
 import javax.lang.model.type.TypeMirror;
 import javax.lang.model.util.SimpleTypeVisitor9;
 
-final class UnsafeCasts {
+final class UnsafeOperations {
   static TypeElement asTypeElement(final TypeMirror typeMirror) {
     final DeclaredType declaredType = asDeclaredType(typeMirror);
     if (declaredType == null) {

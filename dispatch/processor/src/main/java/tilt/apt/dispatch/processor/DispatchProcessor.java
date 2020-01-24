@@ -1,15 +1,18 @@
 package tilt.apt.dispatch.processor;
 
-import static tilt.apt.dispatch.processor.SafeCasts.asElement;
-import static tilt.apt.dispatch.processor.UnsafeCasts.asDeclaredType;
-import static tilt.apt.dispatch.processor.UnsafeCasts.asTypeElement;
+import static tilt.apt.dispatch.processor.SafeOperations.asElement;
+import static tilt.apt.dispatch.processor.SafeOperations.getQualifiedName;
+import static tilt.apt.dispatch.processor.UnsafeOperations.asDeclaredType;
+import static tilt.apt.dispatch.processor.UnsafeOperations.asTypeElement;
 
 import com.google.auto.service.AutoService;
-import java.io.BufferedWriter;
+import com.google.googlejavaformat.java.Formatter;
+import com.google.googlejavaformat.java.FormatterException;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.io.PrintWriter;
 import java.io.StringWriter;
+import java.io.Writer;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -37,6 +40,7 @@ import javax.lang.model.element.Element;
 import javax.lang.model.element.ExecutableElement;
 import javax.lang.model.element.Modifier;
 import javax.lang.model.element.ModuleElement;
+import javax.lang.model.element.Name;
 import javax.lang.model.element.PackageElement;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.TypeParameterElement;
@@ -46,7 +50,6 @@ import javax.lang.model.type.ErrorType;
 import javax.lang.model.type.NoType;
 import javax.lang.model.type.TypeKind;
 import javax.lang.model.type.TypeMirror;
-import javax.lang.model.type.TypeVisitor;
 import javax.lang.model.util.ElementFilter;
 import javax.lang.model.util.SimpleElementVisitor9;
 import javax.lang.model.util.SimpleTypeVisitor9;
@@ -67,6 +70,8 @@ import tilt.apt.dispatch.annotations.Switch;
 public class DispatchProcessor extends AbstractProcessor {
   private static final String SUFFIX_SUBCLASS = "_GeneratedSubclass";
   private static final String SUFFIX_SUPERCLASS = "_GeneratedSuperclass";
+
+  private static final boolean OPTION_INHERIT_CASES = false;
 
   @Override
   public Set<String> getSupportedAnnotationTypes() {
@@ -153,13 +158,14 @@ public class DispatchProcessor extends AbstractProcessor {
       return typeElement.getTypeParameters();
     }
 
-    Stream<String> typeNames(Stream<? extends Element> elements, TypeVisitor<String, ?> visitor) {
-      return elements.map(e -> e.asType().accept(visitor, null)).filter(Objects::nonNull);
+    Stream<String> typeNames(Stream<? extends Element> elements, TypeName visitor) {
+      return elements
+          .map(e -> e.asType().accept(visitor, new AppendableString()).toString())
+          .filter(it -> it.isEmpty() == false);
     }
 
     String formatTypeParameterElements(
-        List<? extends TypeParameterElement> typeParameterElements,
-        TypeVisitor<String, ?> visitor) {
+        List<? extends TypeParameterElement> typeParameterElements, TypeName visitor) {
       if (typeParameterElements.isEmpty()) {
         return "";
       }
@@ -197,7 +203,7 @@ public class DispatchProcessor extends AbstractProcessor {
     private String formatMethodParameter(VariableElement variableElement) {
       return String.format(
           "%s %s",
-          variableElement.asType().accept(ArgumentTypeNameVisitor.INSTANCE, null),
+          variableElement.asType().accept(TypeArgumentName.INSTANCE, new AppendableString()),
           variableElement.getSimpleName());
     }
 
@@ -226,8 +232,8 @@ public class DispatchProcessor extends AbstractProcessor {
           + executableElement
               .getThrownTypes()
               .stream()
-              .map(it -> it.accept(ArgumentTypeNameVisitor.INSTANCE, null))
-              .filter(Objects::nonNull)
+              .map(it -> it.accept(TypeArgumentName.INSTANCE, new AppendableString()).toString())
+              .filter(it -> it.isEmpty() == false)
               .collect(Collectors.joining(", "));
     }
 
@@ -243,7 +249,10 @@ public class DispatchProcessor extends AbstractProcessor {
     }
 
     String getTypeName() {
-      return typeElement.asType().accept(ArgumentTypeNameVisitor.INSTANCE, null);
+      return typeElement
+          .asType()
+          .accept(TypeArgumentName.INSTANCE, new AppendableString())
+          .toString();
     }
   }
 
@@ -293,7 +302,7 @@ public class DispatchProcessor extends AbstractProcessor {
       w.append(
           ac.formatTypeParameterElements(
               Stream.concat(
-                      ac.typeNames(typeParameterElements.stream(), ParameterTypeNameVisitor.INSTANCE),
+                      ac.typeNames(typeParameterElements.stream(), TypeParameterName.INSTANCE),
                       IntStream.range(typeParameterElements.size(), stubCount)
                           .mapToObj(it -> "Stub_" + it))
                   .collect(Collectors.toList())));
@@ -319,7 +328,7 @@ public class DispatchProcessor extends AbstractProcessor {
           wrapIfNonBlank(
               ac.formatTypeParameterElements(
                   concat(ac.getTypeParameterElements(), constructor.getTypeParameters()),
-                  ParameterTypeNameVisitor.INSTANCE),
+                  TypeParameterName.INSTANCE),
               "",
               " "));
       w.append(String.format("%s newInstance", ac.getTypeName()));
@@ -342,7 +351,7 @@ public class DispatchProcessor extends AbstractProcessor {
               this.declaredType.accept(
                   new ExistingSuperclassTypeVisitor(), asElement(this.declaredType)));
       if (declaredType != null) {
-        return "extends " + declaredType.accept(ArgumentTypeNameVisitor.INSTANCE, null);
+        return "extends " + declaredType.accept(TypeArgumentName.INSTANCE, new AppendableString());
       }
       return "";
     }
@@ -356,14 +365,15 @@ public class DispatchProcessor extends AbstractProcessor {
     }
     try {
       final FileObject fileObject = ac.createSourceFile(SUFFIX_SUPERCLASS);
-      try (final BufferedWriter w =
-          new BufferedWriter(
-              new OutputStreamWriter(fileObject.openOutputStream(), StandardCharsets.UTF_8))) {
-        ac.appendPackage(w);
-        sg.append(w);
+      try (final Writer w =
+          new OutputStreamWriter(fileObject.openOutputStream(), StandardCharsets.UTF_8)) {
+        final Appendable aw = new AppendableString();
+        ac.appendPackage(aw);
+        sg.append(aw);
+        w.write(new Formatter().formatSource(aw.toString()));
         w.flush();
       }
-    } catch (final IOException e) {
+    } catch (final IOException | FormatterException e) {
       e.printStackTrace();
     }
   }
@@ -391,7 +401,7 @@ public class DispatchProcessor extends AbstractProcessor {
       w.append(String.format("final class %s", ac.getGeneratedSubclassSimpleName()));
       w.append(
           ac.formatTypeParameterElements(
-              ac.getTypeParameterElements(), ParameterTypeNameVisitor.INSTANCE));
+              ac.getTypeParameterElements(), TypeParameterName.INSTANCE));
       w.append(wrapIfNonBlank(formatExtends(), " ", ""));
     }
 
@@ -401,7 +411,7 @@ public class DispatchProcessor extends AbstractProcessor {
       w.append(
           wrapIfNonBlank(
               ac.formatTypeParameterElements(
-                  constructor.getTypeParameters(), ParameterTypeNameVisitor.INSTANCE),
+                  constructor.getTypeParameters(), TypeParameterName.INSTANCE),
               "",
               " "));
       w.append(ac.getGeneratedSubclassSimpleName());
@@ -424,13 +434,13 @@ public class DispatchProcessor extends AbstractProcessor {
       w.append(
           wrapIfNonBlank(
               ac.formatTypeParameterElements(
-                  method.getTypeParameters(), ParameterTypeNameVisitor.INSTANCE),
+                  method.getTypeParameters(), TypeParameterName.INSTANCE),
               "",
               " "));
       w.append(
           String.format(
               "%s %s",
-              method.getReturnType().accept(ArgumentTypeNameVisitor.INSTANCE, null),
+              method.getReturnType().accept(TypeArgumentName.INSTANCE, new AppendableString()),
               method.getSimpleName()));
       w.append(ac.formatMethodParameters(method));
       w.append(wrapIfNonBlank(ac.formatMethodThrows(method), " ", ""));
@@ -474,14 +484,15 @@ public class DispatchProcessor extends AbstractProcessor {
     final GeneratedSubclass gs = new GeneratedSubclass(an, block);
     try {
       final FileObject fileObject = an.createSourceFile(SUFFIX_SUBCLASS);
-      try (final BufferedWriter w =
-          new BufferedWriter(
-              new OutputStreamWriter(fileObject.openOutputStream(), StandardCharsets.UTF_8))) {
-        an.appendPackage(w);
-        gs.append(w);
+      try (final Writer w =
+          new OutputStreamWriter(fileObject.openOutputStream(), StandardCharsets.UTF_8)) {
+        final Appendable aw = new AppendableString();
+        an.appendPackage(aw);
+        gs.append(aw);
+        w.write(new Formatter().formatSource(aw.toString()));
         w.flush();
       }
-    } catch (final IOException e) {
+    } catch (final IOException | FormatterException e) {
       e.printStackTrace();
     }
   }
@@ -524,21 +535,26 @@ public class DispatchProcessor extends AbstractProcessor {
     final Set<? extends Element> switchElements = roundEnv.getElementsAnnotatedWith(Switch.class);
     log(switchElements.toString());
     for (final Element e : switchElements) {
+      final AnnotationMirror am = getAnnotationMirror(e, Switch.class);
       final ParameterInMethod switchParameter = new ParameterInMethod((VariableElement) e);
       if (switchParameter.isGoodSwitch() == false) {
+        error(
+            "Method with @Switch is not overridable",
+            switchParameter.methodInType.methodElement,
+            am);
         continue;
       }
       final TypeElement typeElement = switchParameter.methodInType.typeElement;
-      if (blocks.remove(typeElement.getQualifiedName().toString()) != null) {
+      if (blocks.remove(getQualifiedName(typeElement)) != null) {
         fatalError("Limitation: no more than one switch per class is allowed");
         continue;
       }
-      blocks.put(
-          typeElement.getQualifiedName().toString(), new SwitchBlock(typeElement, switchParameter));
+      blocks.put(getQualifiedName(typeElement), new SwitchBlock(typeElement, switchParameter));
     }
     final Set<? extends Element> caseElements = roundEnv.getElementsAnnotatedWith(Case.class);
     log(caseElements.toString());
     for (final Element e : caseElements) {
+      final AnnotationMirror am = getAnnotationMirror(e, Case.class);
       final ParameterInMethod caseParameter =
           new ParameterInMethod((VariableElement) e).getGoodCase();
       if (caseParameter.isGoodCase() == false) {
@@ -546,38 +562,46 @@ public class DispatchProcessor extends AbstractProcessor {
       }
       final TypeElement typeElement = caseParameter.methodInType.typeElement;
       final SwitchBlock block =
-          blocks.computeIfAbsent(
-              typeElement.getQualifiedName().toString(), key -> new SwitchBlock(typeElement));
-      block.addCaseParameter(caseParameter);
-    }
-    final var visitedElements = new HashSet<String>();
-    for (final Map.Entry<String, SwitchBlock> e : blocks.entrySet()) {
-      final String key = e.getKey();
-      final SwitchBlock block = e.getValue();
-      if (visitedElements.contains(key) || block.switchParameter == null) {
-        continue;
+          OPTION_INHERIT_CASES
+              ? blocks.computeIfAbsent(
+                  getQualifiedName(typeElement), key -> new SwitchBlock(typeElement))
+              : blocks.get(getQualifiedName(typeElement));
+      if (block != null) {
+        block.addCaseParameter(caseParameter);
+      } else {
+        error("No @Switch for the @Case", caseParameter.methodInType.methodElement, am);
       }
-      final var visitedSuperBlocks = new LinkedList<SwitchBlock>();
-      visitedSuperBlocks.add(block);
-      getExistingSuperclass(block.typeElement)
-          .accept(
-              new SimpleTypeVisitor9<Void, TypeElement>() {
-                @Override
-                public Void visitDeclared(DeclaredType t, TypeElement p) {
-                  final TypeElement typeElement = asElement(t);
-                  final String key = typeElement.getQualifiedName().toString();
-                  final SwitchBlock superBlock = blocks.get(key);
-                  if (superBlock != null) {
-                    visitedSuperBlocks.forEach(it -> superBlock.copyCaseParametersTo(it));
-                    visitedSuperBlocks.push(superBlock);
+    }
+    if (OPTION_INHERIT_CASES) {
+      final var visitedElements = new HashSet<String>();
+      for (final Map.Entry<String, SwitchBlock> e : blocks.entrySet()) {
+        final String key = e.getKey();
+        final SwitchBlock block = e.getValue();
+        if (visitedElements.contains(key) || block.switchParameter == null) {
+          continue;
+        }
+        final var visitedSuperBlocks = new LinkedList<SwitchBlock>();
+        visitedSuperBlocks.add(block);
+        getExistingSuperclass(block.typeElement)
+            .accept(
+                new SimpleTypeVisitor9<Void, TypeElement>() {
+                  @Override
+                  public Void visitDeclared(DeclaredType t, TypeElement p) {
+                    final TypeElement typeElement = asElement(t);
+                    final String key = getQualifiedName(typeElement);
+                    final SwitchBlock superBlock = blocks.get(key);
+                    if (superBlock != null) {
+                      visitedSuperBlocks.forEach(it -> superBlock.copyCaseParametersTo(it));
+                      visitedSuperBlocks.push(superBlock);
+                    }
+                    if (visitedElements.add(key) == false) {
+                      return super.visitDeclared(t, p);
+                    }
+                    return getExistingSuperclass(typeElement).accept(this, p);
                   }
-                  if (visitedElements.add(key) == false) {
-                    return super.visitDeclared(t, p);
-                  }
-                  return getExistingSuperclass(typeElement).accept(this, p);
-                }
-              },
-              block.typeElement);
+                },
+                block.typeElement);
+      }
     }
     blocks.values().removeIf(it -> it.switchParameter == null);
     blocks.forEach(
@@ -585,6 +609,18 @@ public class DispatchProcessor extends AbstractProcessor {
           writeSuperclass(block.typeElement);
           writeSubclass(block);
         });
+  }
+
+  private AnnotationMirror getAnnotationMirror(final Element e, final Class<?> annotationClass) {
+    final Name fqn = processingEnv.getElementUtils().getName(annotationClass.getName());
+    return e.getAnnotationMirrors()
+        .stream()
+        .filter(it -> asElement(it.getAnnotationType()).getQualifiedName().equals(fqn))
+        .findFirst()
+        .orElseThrow(
+            () ->
+                new IllegalStateException(
+                    String.format("Missing annotation %s on %s", annotationClass, e)));
   }
 
   private final class ParameterInMethod {
@@ -623,11 +659,14 @@ public class DispatchProcessor extends AbstractProcessor {
       if (isGoodCase()) {
         return this;
       }
-      final MethodInType overridable = methodInType.findOverridable(this::isGoodCase);
-      final int parameterIndex = methodInType.getMethodParameters().indexOf(variableElement);
-      final VariableElement overridableVariableElement =
-          overridable.getMethodParameters().get(parameterIndex);
-      return new ParameterInMethod(overridable, overridableVariableElement);
+      if (OPTION_INHERIT_CASES) {
+        final MethodInType overridable = methodInType.findOverridable(this::isGoodCase);
+        final int parameterIndex = methodInType.getMethodParameters().indexOf(variableElement);
+        final VariableElement overridableVariableElement =
+            overridable.getMethodParameters().get(parameterIndex);
+        return new ParameterInMethod(overridable, overridableVariableElement);
+      }
+      return this;
     }
 
     @Override
