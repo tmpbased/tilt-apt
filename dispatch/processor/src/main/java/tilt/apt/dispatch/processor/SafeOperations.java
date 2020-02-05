@@ -1,5 +1,7 @@
 package tilt.apt.dispatch.processor;
 
+import javax.lang.model.element.Element;
+import javax.lang.model.element.Modifier;
 import javax.lang.model.element.TypeElement;
 import javax.lang.model.element.TypeParameterElement;
 import javax.lang.model.type.DeclaredType;
@@ -20,5 +22,14 @@ final class SafeOperations {
 
   static String getSimpleName(TypeParameterElement typeElement) {
     return typeElement.getSimpleName().toString();
+  }
+
+  static String getSimpleName(final DeclaredType declaredType) {
+    final TypeElement typeElement = asElement(declaredType);
+    return typeElement.getSimpleName().toString();
+  }
+
+  static boolean isAbstractElement(Element element) {
+    return element.getModifiers().contains(Modifier.ABSTRACT);
   }
 }
