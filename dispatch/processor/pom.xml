@@ -9,7 +9,7 @@
   <dependencies>
     <dependency>
       <groupId>tilt-apt</groupId>
-      <artifactId>tilt-dispatch-annotations</artifactId>
+      <artifactId>auto-dispatch-annotations</artifactId>
       <version>${revision}</version>
     </dependency>
     <dependency>
