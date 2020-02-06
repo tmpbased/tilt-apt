@@ -80,18 +80,18 @@ final class GeneratedSubclass {
                 it ->
                     String.format(
                         "if (%s instanceof %s) {\n%s(%s);\n}",
-                        block.getSwitchMethodParameterName(),
-                        it.getMethodParameterTypeName(),
+                        block.getSwitchParameterName(),
+                        it.getParameterTypeName(),
                         it.getMethodName(),
                         method
                             .getParameters()
                             .stream()
                             .map(
                                 it2 ->
-                                    it2.getSimpleName().equals(block.getSwitchMethodParameterName())
+                                    it2.getSimpleName().equals(block.getSwitchParameterName())
                                         ? String.format(
                                             "(%s) %s",
-                                            it.getMethodParameterTypeName(), it2.getSimpleName())
+                                            it.getParameterTypeName(), it2.getSimpleName())
                                         : it2.getSimpleName())
                             .map(Object::toString)
                             .collect(Collectors.joining(", "))))

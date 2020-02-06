@@ -39,7 +39,7 @@ final class SwitchBlock {
     return switchParameter.methodInType.methodElement;
   }
 
-  Name getSwitchMethodParameterName() {
+  Name getSwitchParameterName() {
     return switchParameter.variableElement.getSimpleName();
   }
 

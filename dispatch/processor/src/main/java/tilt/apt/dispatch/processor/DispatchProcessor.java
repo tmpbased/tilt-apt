@@ -42,11 +42,13 @@ import tilt.apt.dispatch.annotations.Switch;
  */
 @AutoService(Processor.class)
 @SupportedOptions({"debug"})
-class DispatchProcessor extends AbstractProcessor {
+public class DispatchProcessor extends AbstractProcessor {
   static final String SUFFIX_SUBCLASS = "_GeneratedSubclass";
   static final String SUFFIX_SUPERCLASS = "_GeneratedSuperclass";
 
   static final boolean OPTION_INHERIT_CASES = false;
+
+  public DispatchProcessor() {}
 
   @Override
   public Set<String> getSupportedAnnotationTypes() {
@@ -79,7 +81,7 @@ class DispatchProcessor extends AbstractProcessor {
   }
 
   private void writeSuperclass(TypeElement typeElement) {
-    final AnnotatedClass ac = new AnnotatedClass(typeElement);
+    final AnnotatedClass ac = new AnnotatedClass(processingEnv.getElementUtils(), typeElement);
     final GeneratedSuperclass sg = new GeneratedSuperclass(ac);
     if (sg.exists() == false) {
       return;
@@ -90,9 +92,14 @@ class DispatchProcessor extends AbstractProcessor {
       try (final Writer w =
           new OutputStreamWriter(fileObject.openOutputStream(), StandardCharsets.UTF_8)) {
         final Appendable aw = new AppendableString();
-        ac.appendPackage(aw, processingEnv.getElementUtils());
+        ac.appendPackage(aw);
         sg.append(aw);
-        w.write(new Formatter().formatSource(aw.toString()));
+        try {
+          w.write(new Formatter().formatSource(aw.toString()));
+        } catch (final FormatterException e) {
+          System.out.println(aw.toString());
+          throw e;
+        }
         w.flush();
       }
     } catch (final IOException | FormatterException e) {
@@ -101,16 +108,22 @@ class DispatchProcessor extends AbstractProcessor {
   }
 
   private void writeSubclass(SwitchBlock block) {
-    final AnnotatedClass an = new AnnotatedClass(block.typeElement);
+    final AnnotatedClass an =
+        new AnnotatedClass(processingEnv.getElementUtils(), block.typeElement);
     final GeneratedSubclass gs = new GeneratedSubclass(an, block);
     try {
       final FileObject fileObject = an.createSourceFile(processingEnv.getFiler(), SUFFIX_SUBCLASS);
       try (final Writer w =
           new OutputStreamWriter(fileObject.openOutputStream(), StandardCharsets.UTF_8)) {
         final Appendable aw = new AppendableString();
-        an.appendPackage(aw, processingEnv.getElementUtils());
+        an.appendPackage(aw);
         gs.append(aw);
-        w.write(new Formatter().formatSource(aw.toString()));
+        try {
+          w.write(new Formatter().formatSource(aw.toString()));
+        } catch (final FormatterException e) {
+          System.out.println(aw.toString());
+          throw e;
+        }
         w.flush();
       }
     } catch (final IOException | FormatterException e) {

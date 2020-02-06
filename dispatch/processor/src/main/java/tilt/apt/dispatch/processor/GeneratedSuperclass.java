@@ -110,8 +110,10 @@ final class GeneratedSuperclass {
     w.append(
         AnnotatedClass.formatStatement(
             String.format(
-                "return new %s<>%s",
-                ac.getGeneratedSubclassSimpleName(), ac.formatMethodArguments(constructor))));
+                "return new %s%s%s",
+                ac.getGeneratedSubclassSimpleName(),
+                constructor.getTypeParameters().isEmpty() ? "" : "<>",
+                ac.formatMethodArguments(constructor))));
   }
 
   private String formatExtends() {

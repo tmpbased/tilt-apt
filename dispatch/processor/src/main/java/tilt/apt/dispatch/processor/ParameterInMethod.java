@@ -64,7 +64,7 @@ final class ParameterInMethod {
     return methodInType.methodElement.getSimpleName();
   }
 
-  Name getMethodParameterTypeName() {
+  Name getParameterTypeName() {
     return Optional.ofNullable(asTypeElement(variableElement.asType()))
         .map(TypeElement::getQualifiedName)
         .orElse(null);

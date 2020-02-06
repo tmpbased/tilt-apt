@@ -21,20 +21,28 @@ import javax.lang.model.util.Elements;
 import javax.tools.FileObject;
 
 final class AnnotatedClass {
+  private final Elements elements;
   private final TypeElement typeElement;
 
-  public AnnotatedClass(final TypeElement typeElement) {
+  public AnnotatedClass(final Elements elements, final TypeElement typeElement) {
+    this.elements = elements;
     this.typeElement = typeElement;
   }
 
   FileObject createSourceFile(final Filer filer, final String suffix) throws IOException {
-    return filer.createSourceFile(typeElement.getQualifiedName() + suffix);
+    final PackageElement packageElement = elements.getPackageOf(typeElement);
+    return filer.createSourceFile(
+        (packageElement.isUnnamed() ? "" : packageElement.getQualifiedName() + ".")
+            + getClassSimpleName()
+            + suffix);
   }
 
-  void appendPackage(Appendable w, Elements elements) throws IOException {
+  void appendPackage(Appendable w) throws IOException {
     final PackageElement packageElement = elements.getPackageOf(typeElement);
     if (packageElement.isUnnamed() == false) {
-      w.append(AnnotatedClass.formatStatement(String.format("package %s", packageElement.getQualifiedName())));
+      w.append(
+          AnnotatedClass.formatStatement(
+              String.format("package %s", packageElement.getQualifiedName())));
     }
   }
 
@@ -43,11 +51,20 @@ final class AnnotatedClass {
   }
 
   String getGeneratedSuperclassSimpleName() {
-    return typeElement.getSimpleName() + DispatchProcessor.SUFFIX_SUPERCLASS;
+    return getClassSimpleName() + DispatchProcessor.SUFFIX_SUPERCLASS;
   }
 
   String getGeneratedSubclassSimpleName() {
-    return typeElement.getSimpleName() + DispatchProcessor.SUFFIX_SUBCLASS;
+    return getClassSimpleName() + DispatchProcessor.SUFFIX_SUBCLASS;
+  }
+
+  private String getClassSimpleName() {
+    String name = elements.getBinaryName(typeElement).toString();
+    final int lastIndex = name.lastIndexOf('.');
+    if (lastIndex >= 0) {
+      name = name.substring(lastIndex + 1);
+    }
+    return name;
   }
 
   List<? extends TypeParameterElement> getTypeParameterElements() {
